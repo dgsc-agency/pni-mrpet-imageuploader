@@ -60,6 +60,37 @@ async function findProductIdBySku(admin, sku) {
   return edge?.node?.product?.id || null;
 }
 
+// Look up a product by custom.id metafield using productByIdentifier
+async function findProductByCustomId(admin, customId) {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query FindProductByCustomId($identifier: ProductIdentifierInput!) {
+          productByIdentifier(identifier: $identifier) {
+            id
+            title
+          }
+        }
+      `,
+      {
+        variables: {
+          identifier: {
+            customId: { namespace: "custom", key: "id", value: customId },
+          },
+        },
+      },
+    );
+    const resJson = await response.json();
+    const product = resJson?.data?.productByIdentifier;
+    if (!product) return null;
+    return { productId: product.id, productTitle: product.title };
+  } catch (error) {
+    console.log("Product custom.id lookup failed:", error);
+    return null;
+  }
+}
+
+// Find product/variant by SKU; returns ids and titles
 async function findProductAndVariantBySku(admin, sku) {
   const response = await admin.graphql(
     `#graphql
@@ -68,7 +99,8 @@ async function findProductAndVariantBySku(admin, sku) {
           edges {
             node {
               id
-              product { id }
+              title
+              product { id title }
             }
           }
         }
@@ -78,7 +110,13 @@ async function findProductAndVariantBySku(admin, sku) {
   );
   const resJson = await response.json();
   const edge = resJson?.data?.productVariants?.edges?.[0];
-  return { productId: edge?.node?.product?.id || null, variantId: edge?.node?.id || null };
+  if (!edge) return { productId: null, variantId: null, productTitle: null, variantTitle: null };
+  return {
+    productId: edge.node.product.id,
+    variantId: edge.node.id,
+    productTitle: edge.node.product.title,
+    variantTitle: edge.node.title,
+  };
 }
 
 async function createStagedUpload(admin, { filename, mimeType, fileSize }) {
@@ -318,19 +356,42 @@ export const action = async ({ request }) => {
 
       const filename = file.name;
       const { sku, index } = extractSkuAndIndexFromFilename(filename);
+      const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
       const altLabel = index === 0 ? sku : `${sku}_${index}`;
 
-      const { productId, variantId } = await findProductAndVariantBySku(admin, sku);
+      // 1) Try product by custom.id (using base filename as the custom id)
+      const productMatch = await findProductByCustomId(admin, sku);
+      let productId = null;
+      let productTitle = null;
+      let variantId = null;
+      let variantTitle = null;
+      let isProductLevel = false;
+
+      if (productMatch?.productId) {
+        productId = productMatch.productId;
+        productTitle = productMatch.productTitle;
+        isProductLevel = true;
+      } else {
+        // 2) Fallback: find by variant SKU
+        const variantMatch = await findProductAndVariantBySku(admin, sku);
+        productId = variantMatch.productId;
+        variantId = variantMatch.variantId;
+        productTitle = variantMatch.productTitle;
+        variantTitle = variantMatch.variantTitle;
+      }
+
       if (!productId) {
         results.push({ filename, sku, status: "no_product_for_sku" });
         continue;
       }
 
-      // Check existing images on product; match by alt === SKU or alt === filename (case-insensitive)
+      // Check existing images on product; match by exact alt label OR filename equality
       const existingImages = await listProductImageMedia(admin, productId);
       const toReplace = existingImages.filter((img) => {
         const alt = (img.alt || "").trim().toLowerCase();
-        return alt === altLabel.toLowerCase();
+        const src = img?.image?.url || img?.image?.originalSrc || "";
+        const existingBaseName = (src.split("/").pop() || "").split("?")[0].toLowerCase();
+        return alt === altLabel.toLowerCase() || (!!existingBaseName && existingBaseName === uploadedBaseName);
       });
       let replacedCount = 0;
       if (toReplace.length) {
@@ -362,11 +423,21 @@ export const action = async ({ request }) => {
         continue;
       }
 
+      // Alt text: Product - Variant when variantTitle exists; else product title; fallback to altLabel
+      let altText = altLabel;
+      if (productTitle && variantTitle) {
+        altText = `${productTitle} - ${variantTitle}`;
+        if (index > 0) altText += ` (${index + 1})`;
+      } else if (productTitle) {
+        altText = productTitle;
+        if (!isProductLevel && index > 0) altText += ` (${index + 1})`;
+      }
+
       const { media, errors: attachErrors } = await attachImageToProduct(
         admin,
         productId,
         target.resourceUrl,
-        altLabel,
+        altText,
       );
       if (attachErrors?.length) {
         results.push({ filename, sku, status: "attach_failed", errors: attachErrors });
@@ -376,11 +447,11 @@ export const action = async ({ request }) => {
       const createdId = media?.[0]?.id || null;
       if (createdId) {
         const list = productIdToCreated.get(productId) || [];
-        list.push({ id: createdId, order: index });
+        list.push({ id: createdId, order: index, isProductLevel });
         productIdToCreated.set(productId, list);
       }
-      // Also set variant image if SKU matched a variant (best-effort; don't fail the product upload)
-      if (variantId && createdId) {
+      // Assign variant image only when matched by SKU
+      if (variantId && createdId && !isProductLevel) {
         try {
           const ready = await waitForMediaReady(admin, createdId);
           if (!ready) {
@@ -418,17 +489,40 @@ export const action = async ({ request }) => {
 
   // After all uploads, reorder only if this batch included a featured (index 0) image for the product.
   for (const [productId, created] of productIdToCreated.entries()) {
-    const hasFeatured = created.some((c) => c.order === 0);
-    if (!hasFeatured) continue; // avoid pushing non-featured (e.g., _2) to the front
-    created.sort((a, b) => a.order - b.order);
-    const moves = created.map((m, i) => ({ id: m.id, newPosition: String(i + 1) }));
-    
+    // Partition: product-level vs variant-level created in this batch
+    const productLevel = created.filter((c) => c.isProductLevel);
+    const variantLevel = created.filter((c) => !c.isProductLevel);
+    if (!productLevel.length) continue;
+
+    // Ensure all newly created media are READY before attempting reorder
+    try {
+      await Promise.all(
+        created.map(async (m) => {
+          try {
+            await waitForMediaReady(admin, m.id, { timeoutMs: 20000, intervalMs: 800 });
+          } catch (_) {}
+        }),
+      );
+    } catch (_) {}
+
+    productLevel.sort((a, b) => a.order - b.order);
+    variantLevel.sort((a, b) => a.order - b.order);
+
+    // Build moves: product-level occupy positions 1..p; variant-level follow after
+    const moves = [];
+    for (let i = 0; i < productLevel.length; i++) {
+      moves.push({ id: productLevel[i].id, newPosition: String(i + 1) });
+    }
+    for (let j = 0; j < variantLevel.length; j++) {
+      moves.push({ id: variantLevel[j].id, newPosition: String(productLevel.length + j + 1) });
+    }
+
     // Debug: log what we're trying to reorder
-    console.log(`Reordering product ${productId}:`, moves);
-    
+    console.log(`Reordering product ${productId} (product first, variants after):`, moves);
+
     // Add a small delay to ensure media is ready for reordering
     await new Promise(resolve => setTimeout(resolve, 1000));
-    
+
     const reorderResult = await reorderProductMedia(admin, productId, moves);
     if (!reorderResult.success) {
       results.push({ 

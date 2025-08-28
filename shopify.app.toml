@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "c40e38c3bb8eaf323dae0b51964261bc"
-application_url = "https://intent-fuji-charles-smith.trycloudflare.com"
+application_url = "https://shaved-engaged-develop-over.trycloudflare.com"
 embedded = true
 name = "mr-pet-image-uploader"
 handle = "mr-pet-image-uploader"
@@ -23,9 +23,9 @@ scopes = "read_products,write_products"
 
 [auth]
 redirect_urls = [
-  "https://intent-fuji-charles-smith.trycloudflare.com/auth/callback",
-  "https://intent-fuji-charles-smith.trycloudflare.com/auth/shopify/callback",
-  "https://intent-fuji-charles-smith.trycloudflare.com/api/auth/callback"
+  "https://shaved-engaged-develop-over.trycloudflare.com/auth/callback",
+  "https://shaved-engaged-develop-over.trycloudflare.com/auth/shopify/callback",
+  "https://shaved-engaged-develop-over.trycloudflare.com/api/auth/callback"
 ]
 
 [pos]
