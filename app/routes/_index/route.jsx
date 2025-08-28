@@ -1,4 +1,4 @@
-import { redirect } from "@remix-run/node";
+import { redirect } from "@vercel/remix";
 import { Form, useLoaderData } from "@remix-run/react";
 import { login } from "../../shopify.server";
 import styles from "./styles.module.css";
