@@ -22,6 +22,9 @@ export default function App() {
         <Link to="/app" rel="home">
           Image Uploader
         </Link>
+        <Link to="/app/videos">
+          Video Uploader
+        </Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
