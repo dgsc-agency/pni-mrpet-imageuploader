@@ -17,7 +17,8 @@ import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  console.log("Video loader - shop:", session?.shop, "admin:", !!admin);
   return null;
 };
 
@@ -75,7 +76,7 @@ async function createStagedUpload(admin, { filename, mimeType, fileSize }) {
       variables: {
         input: [
           {
-            resource: "VIDEO",
+            resource: "IMAGE",
             filename,
             mimeType: mimeType || "video/mp4",
             fileSize: String(fileSize ?? 0),
@@ -107,7 +108,8 @@ async function attachVideoToProduct(admin, productId, resourceUrl, altText) {
       mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
         productCreateMedia(productId: $productId, media: $media) {
           media {
-            ... on MediaVideo { id alt video { originalSrc } }
+            ... on Media { id alt }
+            ... on MediaImage { id alt image { originalSrc } }
           }
           mediaUserErrors { field message }
         }
@@ -120,7 +122,7 @@ async function attachVideoToProduct(admin, productId, resourceUrl, altText) {
           {
             alt: altText || null,
             originalSource: resourceUrl,
-            mediaContentType: "VIDEO",
+            mediaContentType: "IMAGE",
           },
         ],
       },
@@ -143,10 +145,10 @@ async function listProductVideoMedia(admin, productId) {
               node {
                 id
                 __typename
-                ... on MediaVideo {
+                ... on MediaImage {
                   id
                   alt
-                  video { originalSrc }
+                  image { originalSrc }
                 }
               }
             }
@@ -158,7 +160,7 @@ async function listProductVideoMedia(admin, productId) {
   );
   const jsonRes = await response.json();
   const edges = jsonRes?.data?.product?.media?.edges || [];
-  return edges.map((e) => e.node).filter((n) => n.__typename === "MediaVideo");
+  return edges.map((e) => e.node).filter((n) => n.__typename === "MediaImage");
 }
 
 async function deleteProductMedia(admin, productId, mediaIds) {
@@ -181,7 +183,8 @@ async function deleteProductMedia(admin, productId, mediaIds) {
 }
 
 export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
+  console.log("Video action - shop:", session?.shop, "admin:", !!admin);
   const formData = await request.formData();
   const files = formData.getAll("files");
 
@@ -211,7 +214,7 @@ export const action = async ({ request }) => {
       const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
       const toReplace = existingVideos.filter((video) => {
         const alt = (video.alt || "").trim().toLowerCase();
-        const src = video?.video?.url || video?.video?.originalSrc || "";
+        const src = video?.image?.url || video?.image?.originalSrc || "";
         const existingBaseName = (src.split("/").pop() || "").split("?")[0].toLowerCase();
         return alt === customId.toLowerCase() || (!!existingBaseName && existingBaseName === uploadedBaseName);
       });
