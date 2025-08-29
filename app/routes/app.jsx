@@ -20,10 +20,8 @@ export default function App() {
     <AppProvider isEmbeddedApp apiKey={apiKey}>
       <NavMenu>
         <Link to="/app" rel="home">
-          Home
+          Image Uploader
         </Link>
-        <Link to="/app/additional">Additional page</Link>
-        <Link to="/app/bulk-upload">Bulk upload</Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
