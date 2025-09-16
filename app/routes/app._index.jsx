@@ -508,14 +508,19 @@ export const action = async ({ request }) => {
     productLevel.sort((a, b) => a.order - b.order);
     variantLevel.sort((a, b) => a.order - b.order);
 
-    // Build moves: product-level occupy positions 1..p; variant-level follow after
-    const moves = [];
-    for (let i = 0; i < productLevel.length; i++) {
-      moves.push({ id: productLevel[i].id, newPosition: String(i + 1) });
-    }
-    for (let j = 0; j < variantLevel.length; j++) {
-      moves.push({ id: variantLevel[j].id, newPosition: String(productLevel.length + j + 1) });
-    }
+    // Build a comprehensive order including existing media so Admin shows the true first item
+    const existingIds = await listAllProductMediaIds(admin, productId);
+    const createdIdsInOrder = [
+      ...productLevel.map((m) => m.id),
+      ...variantLevel.map((m) => m.id),
+    ];
+    const remainingExisting = existingIds.filter((id) => !createdIdsInOrder.includes(id));
+    const finalOrder = [
+      ...productLevel.map((m) => m.id),
+      ...remainingExisting,
+      ...variantLevel.map((m) => m.id),
+    ];
+    const moves = finalOrder.map((id, index) => ({ id, newPosition: String(index + 1) }));
 
     // Debug: log what we're trying to reorder
     console.log(`Reordering product ${productId} (product first, variants after):`, moves);
@@ -556,6 +561,24 @@ async function reorderProductMedia(admin, productId, moves) {
     return { success: false, errors, message: msg };
   }
   return { success: true };
+}
+
+async function listAllProductMediaIds(admin, productId) {
+  const response = await admin.graphql(
+    `#graphql
+      query AllProductMediaIds($id: ID!) {
+        product(id: $id) {
+          id
+          media(first: 250) {
+            nodes { id }
+          }
+        }
+      }
+    `,
+    { variables: { id: productId } },
+  );
+  const json = await response.json();
+  return json?.data?.product?.media?.nodes?.map((n) => n.id) || [];
 }
 
 export default function BulkUpload() {
