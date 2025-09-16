@@ -532,6 +532,17 @@ export const action = async ({ request }) => {
         details: reorderResult.errors 
       });
     }
+    // Ensure the first product-level image is explicitly set as the featured image
+    if (productLevel[0]?.id) {
+      const { errors: featuredErrors } = await setFeaturedMedia(admin, productId, productLevel[0].id);
+      if (featuredErrors?.length) {
+        results.push({
+          productId,
+          status: "set_featured_failed",
+          details: featuredErrors,
+        });
+      }
+    }
   }
 
   return json({ results });
@@ -556,6 +567,22 @@ async function reorderProductMedia(admin, productId, moves) {
     return { success: false, errors, message: msg };
   }
   return { success: true };
+}
+
+async function setFeaturedMedia(admin, productId, mediaId) {
+  const response = await admin.graphql(
+    `#graphql
+      mutation ProductSetFeaturedMedia($productId: ID!, $mediaId: ID!) {
+        productSetFeaturedMedia(productId: $productId, mediaId: $mediaId) {
+          userErrors { field message }
+        }
+      }
+    `,
+    { variables: { productId, mediaId } },
+  );
+  const resJson = await response.json();
+  const errors = resJson?.data?.productSetFeaturedMedia?.userErrors || [];
+  return { errors };
 }
 
 export default function BulkUpload() {
