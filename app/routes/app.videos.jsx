@@ -76,7 +76,7 @@ async function createStagedUpload(admin, { filename, mimeType, fileSize }) {
       variables: {
         input: [
           {
-            resource: "FILE",
+            resource: "VIDEO",
             filename,
             mimeType: mimeType || "video/mp4",
             fileSize: String(fileSize ?? 0),
@@ -169,6 +169,31 @@ async function attachVideoToProduct(admin, productId, fileId, altText) {
   return { media, errors };
 }
 
+async function waitForVideoReady(admin, videoId, { timeoutMs = 300000, intervalMs = 2000 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const res = await admin.graphql(
+      `#graphql
+        query MediaStatus($id: ID!) {
+          node(id: $id) {
+            id
+            ... on Media { status }
+            ... on Video { fileStatus }
+          }
+        }
+      `,
+      { variables: { id: videoId } },
+    );
+    const json = await res.json();
+    const node = json?.data?.node;
+    const status = node?.status || node?.fileStatus;
+    if (status === "READY") return true;
+    if (status === "FAILED") return false;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
 async function listProductVideoMedia(admin, productId) {
   const response = await admin.graphql(
     `#graphql
@@ -181,11 +206,7 @@ async function listProductVideoMedia(admin, productId) {
                 id
                 __typename
                 alt
-                ... on MediaImage {
-                  id
-                  alt
-                  image { originalSrc }
-                }
+                ... on Video { id }
               }
             }
           }
@@ -196,7 +217,7 @@ async function listProductVideoMedia(admin, productId) {
   );
   const jsonRes = await response.json();
   const edges = jsonRes?.data?.product?.media?.edges || [];
-  return edges.map((e) => e.node).filter((n) => n.__typename === "MediaImage");
+  return edges.map((e) => e.node).filter((n) => n.__typename === "Video");
 }
 
 async function deleteProductMedia(admin, productId, mediaIds) {
@@ -250,11 +271,7 @@ export const action = async ({ request }) => {
       const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
       const toReplace = existingVideos.filter((video) => {
         const alt = (video.alt || "").trim().toLowerCase();
-        const src = video?.image?.url || video?.image?.originalSrc || "";
-        const existingBaseName = (src.split("/").pop() || "").split("?")[0].toLowerCase();
-        // Check if this is a video file by looking for video extensions in the filename
-        const isVideoFile = /\.(mp4|mov|webm|avi|mkv)$/i.test(existingBaseName);
-        return (alt === customId.toLowerCase() || (!!existingBaseName && existingBaseName === uploadedBaseName)) && isVideoFile;
+        return alt === customId.toLowerCase() || alt === uploadedBaseName;
       });
 
       let replacedCount = 0;
@@ -287,18 +304,22 @@ export const action = async ({ request }) => {
         continue;
       }
 
-      // Create file in Shopify
-      const { files, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
+      // Create file in Shopify (VIDEO) and wait until READY
+      const { files: createdFiles, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
       if (fileErrors?.length) {
         results.push({ filename, customId, status: "file_create_failed", errors: fileErrors });
         continue;
       }
 
-      const fileId = files?.[0]?.id;
+      const fileId = createdFiles?.[0]?.id;
       if (!fileId) {
         results.push({ filename, customId, status: "no_file_id_returned" });
         continue;
       }
+
+      try {
+        await waitForVideoReady(admin, fileId, { timeoutMs: 300000, intervalMs: 2000 });
+      } catch (_) {}
 
       // Alt text: Use product title if available, otherwise use custom ID
       const altText = productTitle || customId;

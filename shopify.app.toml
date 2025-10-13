@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "c40e38c3bb8eaf323dae0b51964261bc"
-application_url = "https://bacterial-nearest-moreover-universities.trycloudflare.com"
+application_url = "https://pni-mrpet-imageuploader.vercel.app"
 embedded = true
 name = "mr-pet-image-uploader"
 handle = "mr-pet-image-uploader"
@@ -19,7 +19,7 @@ api_version = "2025-07"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_products"
+scopes = "read_products,write_products,write_files"
 
 [auth]
 redirect_urls = [
@@ -34,4 +34,3 @@ embedded = false
 [build]
 dev_store_url = "mrpetdevelopment.myshopify.com"
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
