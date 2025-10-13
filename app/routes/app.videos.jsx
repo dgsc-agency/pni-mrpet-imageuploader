@@ -304,7 +304,16 @@ export const action = async ({ request }) => {
       } catch (_) {}
 
       const altText = productTitle || baseKey;
-      // Attach using originalSource + VIDEO to satisfy CreateMediaInput schema on this shop
+
+      // If this exact video is already attached, skip attaching
+      const existingAfterCreate = await listProductVideoMedia(admin, productId);
+      const alreadyHas = existingAfterCreate.some((v) => v.id === videoId);
+      if (alreadyHas) {
+        results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media: existingAfterCreate });
+        continue;
+      }
+
+      // Attach by mediaId only (avoid duplicate external_video_id errors)
       const attachRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -319,8 +328,7 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                originalSource: target.resourceUrl,
-                mediaContentType: "VIDEO",
+                mediaId: videoId,
                 alt: altText || null,
               },
             ],
