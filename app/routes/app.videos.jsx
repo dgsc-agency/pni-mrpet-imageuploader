@@ -275,35 +275,15 @@ export const action = async ({ request }) => {
         continue;
       }
 
-      // create file in Shopify
-      const { files: createdFiles, errors: fileErrors } = await createFileInShopify(
-        admin,
-        target.resourceUrl,
-        filename,
-      );
-      if (fileErrors?.length) {
-        results.push({ filename, customId: baseKey, status: "file_create_failed", errors: fileErrors });
-        continue;
-      }
-
-      const created = createdFiles?.[0];
-      const videoId = created?.id;
-      if (!videoId) {
-        results.push({ filename, customId: baseKey, status: "no_file_id_returned" });
-        continue;
-      }
-
-      await waitForVideoReady(admin, videoId, { timeoutMs: 300000, intervalMs: 2000 });
-      await new Promise((r) => setTimeout(r, 10000)); // ✅ buffer after READY
-
+      // Alt text: Use product title if available, otherwise use filename key
       const altText = productTitle || baseKey;
 
-      // attach by originalSource instead of mediaId
+      // Attach directly using originalSource from staged VIDEO (no FileCreate, no mediaId)
       const attachRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
             productCreateMedia(productId: $productId, media: $media) {
-              media { id alt mediaContentType status }
+              media { ... on Media { id alt } }
               mediaUserErrors { field message }
             }
           }
@@ -321,24 +301,15 @@ export const action = async ({ request }) => {
           },
         },
       );
-
       const attachJson = await attachRes.json();
       const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
       const media = attachJson?.data?.productCreateMedia?.media || [];
       if (attachErrors?.length) {
-        console.error("Attach failed", attachErrors);
         results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachErrors });
         continue;
       }
 
-      results.push({
-        filename,
-        customId: baseKey,
-        status: replacedCount ? "replaced" : "ok",
-        replaced: replacedCount,
-        productId,
-        media,
-      });
+      results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media });
     } catch (error) {
       const safeName = typeof file === "object" && file?.name ? file.name : String(file);
       const caughtCustomId = typeof safeName === "string" ? extractCustomIdFromFilename(safeName) : undefined;
