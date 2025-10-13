@@ -6,12 +6,14 @@
   "description": "Standalone CLI to bulk upload images to Shopify and assign to products (SKU and custom.id)",
   "bin": {
     "mrpet-upload": "src/index.js",
-    "mrpet-delete-products": "src/delete-products.js"
+    "mrpet-delete-products": "src/delete-products.js",
+    "mrpet-video-upload": "src/video-uploader.js"
   },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node src/index.js --help",
-    "delete:products": "node src/delete-products.js"
+    "delete:products": "node src/delete-products.js",
+    "videos": "node src/video-uploader.js"
   },
   "dependencies": {
     "axios": "^1.7.7",
