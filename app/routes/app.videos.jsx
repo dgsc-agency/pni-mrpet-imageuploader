@@ -304,6 +304,7 @@ export const action = async ({ request }) => {
       } catch (_) {}
 
       const altText = productTitle || baseKey;
+      // Attach using originalSource + VIDEO to satisfy CreateMediaInput schema on this shop
       const attachRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -318,7 +319,8 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                mediaId: videoId,
+                originalSource: target.resourceUrl,
+                mediaContentType: "VIDEO",
                 alt: altText || null,
               },
             ],
