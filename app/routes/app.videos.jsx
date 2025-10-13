@@ -16,6 +16,8 @@ import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { json } from "@remix-run/node";
 import { authenticate } from "../shopify.server";
 
+/* -------------------- SERVER -------------------- */
+
 export const loader = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   console.log("Video loader - shop:", session?.shop, "admin:", !!admin);
@@ -25,7 +27,7 @@ export const loader = async ({ request }) => {
 function extractCustomIdFromFilename(filename) {
   const base = filename.split("/").pop() || filename;
   const withoutQuery = base.split("?")[0];
-  const nameOnly = (withoutQuery.includes("."))
+  const nameOnly = withoutQuery.includes(".")
     ? withoutQuery.substring(0, withoutQuery.lastIndexOf("."))
     : withoutQuery;
   return nameOnly.trim();
@@ -36,10 +38,7 @@ async function findProductByCustomId(admin, customId) {
     const response = await admin.graphql(
       `#graphql
         query FindProductByCustomId($identifier: ProductIdentifierInput!) {
-          productByIdentifier(identifier: $identifier) {
-            id
-            title
-          }
+          productByIdentifier(identifier: $identifier) { id title }
         }
       `,
       {
@@ -73,7 +72,8 @@ async function findProductAndVariantBySku(admin, sku) {
   );
   const resJson = await response.json();
   const edge = resJson?.data?.productVariants?.edges?.[0];
-  if (!edge) return { productId: null, variantId: null, productTitle: null, variantTitle: null };
+  if (!edge)
+    return { productId: null, variantId: null, productTitle: null, variantTitle: null };
   return {
     productId: edge.node.product.id,
     variantId: edge.node.id,
@@ -125,23 +125,14 @@ async function createFileInShopify(admin, resourceUrl, filename) {
     `#graphql
       mutation FileCreate($files: [FileCreateInput!]!) {
         fileCreate(files: $files) {
-          files {
-            __typename
-            ... on Video { id fileStatus }
-          }
+          files { __typename ... on Video { id fileStatus url } }
           userErrors { field message }
         }
       }
     `,
     {
       variables: {
-        files: [
-          {
-            originalSource: resourceUrl,
-            contentType: "VIDEO",
-            alt: filename,
-          },
-        ],
+        files: [{ originalSource: resourceUrl, contentType: "VIDEO", alt: filename }],
       },
     },
   );
@@ -157,11 +148,7 @@ async function waitForVideoReady(admin, videoId, { timeoutMs = 300000, intervalM
     const res = await admin.graphql(
       `#graphql
         query MediaStatus($id: ID!) {
-          node(id: $id) {
-            id
-            ... on Media { status }
-            ... on Video { fileStatus }
-          }
+          node(id: $id) { id ... on Media { status } ... on Video { fileStatus } }
         }
       `,
       { variables: { id: videoId } },
@@ -216,7 +203,7 @@ async function deleteProductMedia(admin, productId, mediaIds) {
 
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
-  console.log("Video action - shop:", session?.shop, "admin:", !!admin);
+  console.log("Video action - shop:", session?.shop);
   const formData = await request.formData();
   const files = formData.getAll("files");
 
@@ -250,6 +237,7 @@ export const action = async ({ request }) => {
         continue;
       }
 
+      // delete existing videos with same alt/custom id
       const existingVideos = await listProductVideoMedia(admin, productId);
       const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
       const toReplace = existingVideos.filter((video) => {
@@ -270,6 +258,7 @@ export const action = async ({ request }) => {
         }
       }
 
+      // staged upload
       const { target, errors: stagedErrors } = await createStagedUpload(admin, {
         filename,
         mimeType: file.type,
@@ -286,7 +275,12 @@ export const action = async ({ request }) => {
         continue;
       }
 
-      const { files: createdFiles, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
+      // create file in Shopify
+      const { files: createdFiles, errors: fileErrors } = await createFileInShopify(
+        admin,
+        target.resourceUrl,
+        filename,
+      );
       if (fileErrors?.length) {
         results.push({ filename, customId: baseKey, status: "file_create_failed", errors: fileErrors });
         continue;
@@ -299,26 +293,17 @@ export const action = async ({ request }) => {
         continue;
       }
 
-      try {
-        await waitForVideoReady(admin, videoId, { timeoutMs: 300000, intervalMs: 2000 });
-      } catch (_) {}
+      await waitForVideoReady(admin, videoId, { timeoutMs: 300000, intervalMs: 2000 });
+      await new Promise((r) => setTimeout(r, 10000)); // ✅ buffer after READY
 
       const altText = productTitle || baseKey;
 
-      // If this exact video is already attached, skip attaching
-      const existingAfterCreate = await listProductVideoMedia(admin, productId);
-      const alreadyHas = existingAfterCreate.some((v) => v.id === videoId);
-      if (alreadyHas) {
-        results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media: existingAfterCreate });
-        continue;
-      }
-
-      // Attach by mediaId only (avoid duplicate external_video_id errors)
+      // attach by originalSource instead of mediaId
       const attachRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
             productCreateMedia(productId: $productId, media: $media) {
-              media { ... on Media { id alt } }
+              media { id alt mediaContentType status }
               mediaUserErrors { field message }
             }
           }
@@ -328,37 +313,55 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                mediaId: videoId,
+                originalSource: target.resourceUrl,
+                mediaContentType: "VIDEO",
                 alt: altText || null,
               },
             ],
           },
         },
       );
+
       const attachJson = await attachRes.json();
       const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
       const media = attachJson?.data?.productCreateMedia?.media || [];
       if (attachErrors?.length) {
+        console.error("Attach failed", attachErrors);
         results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachErrors });
         continue;
       }
 
-      results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media });
+      results.push({
+        filename,
+        customId: baseKey,
+        status: replacedCount ? "replaced" : "ok",
+        replaced: replacedCount,
+        productId,
+        media,
+      });
     } catch (error) {
       const safeName = typeof file === "object" && file?.name ? file.name : String(file);
       const caughtCustomId = typeof safeName === "string" ? extractCustomIdFromFilename(safeName) : undefined;
-      results.push({ filename: safeName, customId: caughtCustomId, status: "error", message: error?.message });
+      results.push({
+        filename: safeName,
+        customId: caughtCustomId,
+        status: "error",
+        message: error?.message,
+      });
     }
   }
 
   return json({ results });
 };
 
+/* -------------------- CLIENT -------------------- */
+
 export default function VideoUpload() {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
   const [files, setFiles] = useState([]);
-  const isSubmitting = ["loading", "submitting"].includes(fetcher.state) && fetcher.formMethod === "POST";
+  const isSubmitting =
+    ["loading", "submitting"].includes(fetcher.state) && fetcher.formMethod === "POST";
 
   const onDrop = useCallback((_dropFiles, acceptedFiles) => {
     setFiles((prev) => [...prev, ...acceptedFiles]);
@@ -371,9 +374,7 @@ export default function VideoUpload() {
   const handleSubmit = useCallback(() => {
     if (!files.length || isSubmitting) return;
     const formData = new FormData();
-    for (const file of files) {
-      formData.append("files", file, file.name);
-    }
+    for (const file of files) formData.append("files", file, file.name);
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   }, [files, fetcher, isSubmitting]);
 
@@ -407,6 +408,7 @@ export default function VideoUpload() {
           <DropZone accept="video/*" allowMultiple onDrop={onDrop}>
             <DropZone.FileUpload actionTitle="Add videos" actionHint="or drop to upload" />
           </DropZone>
+
           {files.length ? (
             <Card>
               <BlockStack gap="200">
@@ -415,12 +417,8 @@ export default function VideoUpload() {
                   {files.map((f, i) => (
                     <List.Item key={`${f.name}-${i}`}>
                       <InlineStack align="space-between">
-                        <span>
-                          <code>{f.name}</code>
-                        </span>
-                        <Button onClick={() => removeFile(i)} variant="tertiary">
-                          Remove
-                        </Button>
+                        <span><code>{f.name}</code></span>
+                        <Button onClick={() => removeFile(i)} variant="tertiary">Remove</Button>
                       </InlineStack>
                     </List.Item>
                   ))}
@@ -428,6 +426,7 @@ export default function VideoUpload() {
               </BlockStack>
             </Card>
           ) : null}
+
           <InlineStack gap="200">
             <Button loading={isSubmitting} disabled={!files.length} onClick={handleSubmit}>
               Upload
@@ -436,6 +435,7 @@ export default function VideoUpload() {
               Clear
             </Button>
           </InlineStack>
+
           {(fetcher.data?.results || []).length ? (
             <BlockStack gap="200">
               {summary.failed ? (
@@ -449,7 +449,9 @@ export default function VideoUpload() {
                 rows={(fetcher.data.results || []).map((r) => [
                   r.filename || r.productId || "Product",
                   r.customId || "-",
-                  r.status + (r.message ? `: ${r.message}` : "") + (r.details ? ` (${JSON.stringify(r.details)})` : ""),
+                  r.status +
+                    (r.message ? `: ${r.message}` : "") +
+                    (r.details ? ` (${JSON.stringify(r.details)})` : ""),
                 ])}
               />
             </BlockStack>
@@ -458,4 +460,4 @@ export default function VideoUpload() {
       </Card>
     </Page>
   );
-} 
+}
