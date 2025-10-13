@@ -60,7 +60,6 @@ async function findProductByCustomId(admin, customId) {
   }
 }
 
-// Find product/variant by SKU (fallback like images route)
 async function findProductAndVariantBySku(admin, sku) {
   const response = await admin.graphql(
     `#graphql
@@ -128,8 +127,7 @@ async function createFileInShopify(admin, resourceUrl, filename) {
         fileCreate(files: $files) {
           files {
             __typename
-            ... on Video { id fileStatus url }
-            ... on GenericFile { id url }
+            ... on Video { id fileStatus }
           }
           userErrors { field message }
         }
@@ -232,26 +230,23 @@ export const action = async ({ request }) => {
       }
 
       const filename = file.name;
-      const customId = extractCustomIdFromFilename(filename);
-      const baseName = (filename.split("/").pop() || filename).split("?")[0];
-      // Try custom.id first, then fallback to SKU
+      const baseKey = extractCustomIdFromFilename(filename);
+
       let productId = null;
       let productTitle = null;
-      {
-        const productMatch = await findProductByCustomId(admin, customId);
-        if (productMatch?.productId) {
-          productId = productMatch.productId;
-          productTitle = productMatch.productTitle;
-        } else {
-          const skuMatch = await findProductAndVariantBySku(admin, customId);
-          if (skuMatch?.productId) {
-            productId = skuMatch.productId;
-            productTitle = skuMatch.productTitle;
-          }
+      const byCustom = await findProductByCustomId(admin, baseKey);
+      if (byCustom?.productId) {
+        productId = byCustom.productId;
+        productTitle = byCustom.productTitle;
+      } else {
+        const bySku = await findProductAndVariantBySku(admin, baseKey);
+        if (bySku?.productId) {
+          productId = bySku.productId;
+          productTitle = bySku.productTitle;
         }
       }
       if (!productId) {
-        results.push({ filename, customId, status: "no_product_for_custom_id_or_sku" });
+        results.push({ filename, customId: baseKey, status: "no_product_for_custom_id_or_sku" });
         continue;
       }
 
@@ -259,9 +254,8 @@ export const action = async ({ request }) => {
       const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
       const toReplace = existingVideos.filter((video) => {
         const alt = (video.alt || "").trim().toLowerCase();
-        return alt === customId.toLowerCase() || alt === uploadedBaseName;
+        return alt === baseKey.toLowerCase() || alt === uploadedBaseName;
       });
-
       let replacedCount = 0;
       if (toReplace.length) {
         const { deleted, errors: delErrors } = await deleteProductMedia(
@@ -271,7 +265,7 @@ export const action = async ({ request }) => {
         );
         replacedCount = deleted;
         if (delErrors?.length) {
-          results.push({ filename, customId, status: "delete_existing_failed", errors: delErrors });
+          results.push({ filename, customId: baseKey, status: "delete_existing_failed", errors: delErrors });
           continue;
         }
       }
@@ -282,37 +276,35 @@ export const action = async ({ request }) => {
         fileSize: file.size,
       });
       if (!target) {
-        results.push({ filename, customId, status: "staged_upload_error", errors: stagedErrors });
+        results.push({ filename, customId: baseKey, status: "staged_upload_error", errors: stagedErrors });
         continue;
       }
 
       const uploaded = await uploadToS3Target(target, file, filename);
       if (!uploaded) {
-        results.push({ filename, customId, status: "s3_upload_failed" });
+        results.push({ filename, customId: baseKey, status: "s3_upload_failed" });
         continue;
       }
 
       const { files: createdFiles, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
       if (fileErrors?.length) {
-        results.push({ filename, customId, status: "file_create_failed", errors: fileErrors });
+        results.push({ filename, customId: baseKey, status: "file_create_failed", errors: fileErrors });
         continue;
       }
 
       const created = createdFiles?.[0];
-      const fileUrl = created?.url;
-      if (!fileUrl) {
-        results.push({ filename, customId, status: "no_file_url_returned" });
+      const videoId = created?.id;
+      if (!videoId) {
+        results.push({ filename, customId: baseKey, status: "no_file_id_returned" });
         continue;
       }
 
       try {
-        await waitForVideoReady(admin, created?.id, { timeoutMs: 300000, intervalMs: 2000 });
+        await waitForVideoReady(admin, videoId, { timeoutMs: 300000, intervalMs: 2000 });
       } catch (_) {}
 
-      const altText = productTitle || customId;
-
-      // Attach by originalSource + VIDEO to match your shop's API schema
-      const response = await admin.graphql(
+      const altText = productTitle || baseKey;
+      const attachRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
             productCreateMedia(productId: $productId, media: $media) {
@@ -326,23 +318,22 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                originalSource: fileUrl,
-                mediaContentType: "VIDEO",
+                mediaId: videoId,
                 alt: altText || null,
               },
             ],
           },
         },
       );
-      const attachJson = await response.json();
+      const attachJson = await attachRes.json();
       const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
       const media = attachJson?.data?.productCreateMedia?.media || [];
       if (attachErrors?.length) {
-        results.push({ filename, customId, status: "attach_failed", errors: attachErrors });
+        results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachErrors });
         continue;
       }
 
-      results.push({ filename, customId, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media });
+      results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media });
     } catch (error) {
       const safeName = typeof file === "object" && file?.name ? file.name : String(file);
       const caughtCustomId = typeof safeName === "string" ? extractCustomIdFromFilename(safeName) : undefined;
