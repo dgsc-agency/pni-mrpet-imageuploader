@@ -11,6 +11,7 @@ import {
   List,
   DataTable,
   Banner,
+  TextField,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { json } from "@remix-run/node";
@@ -125,7 +126,7 @@ async function createFileInShopify(admin, resourceUrl, filename) {
     `#graphql
       mutation FileCreate($files: [FileCreateInput!]!) {
         fileCreate(files: $files) {
-          files { __typename ... on Video { id fileStatus url } }
+          files { __typename ... on Video { id fileStatus } }
           userErrors { field message }
         }
       }
@@ -161,6 +162,22 @@ async function waitForVideoReady(admin, videoId, { timeoutMs = 300000, intervalM
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   return false;
+}
+
+async function getVideoOriginalSource(admin, videoId) {
+  const res = await admin.graphql(
+    `#graphql
+      query VideoOriginalSource($id: ID!) {
+        node(id: $id) {
+          id
+          ... on Video { originalSource { url mimeType format } }
+        }
+      }
+    `,
+    { variables: { id: videoId } },
+  );
+  const json = await res.json();
+  return json?.data?.node?.originalSource?.url || null;
 }
 
 async function listProductVideoMedia(admin, productId) {
@@ -206,6 +223,7 @@ export const action = async ({ request }) => {
   console.log("Video action - shop:", session?.shop);
   const formData = await request.formData();
   const files = formData.getAll("files");
+  const additionalProductIds = formData.get("additionalProductIds") || "";
 
   const results = [];
 
@@ -219,6 +237,119 @@ export const action = async ({ request }) => {
       const filename = file.name;
       const baseKey = extractCustomIdFromFilename(filename);
 
+      // Check if we have explicit IDs to attach to
+      const explicitIds = (additionalProductIds || "")
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => !!s);
+
+      if (explicitIds.length) {
+        // Upload video once and attach to all provided IDs
+        const { target, errors: stagedErrors } = await createStagedUpload(admin, {
+          filename,
+          mimeType: file.type,
+          fileSize: file.size,
+        });
+        if (!target) {
+          results.push({ filename, status: "staged_upload_error", errors: stagedErrors });
+          continue;
+        }
+
+        const uploaded = await uploadToS3Target(target, file, filename);
+        if (!uploaded) {
+          results.push({ filename, status: "s3_upload_failed" });
+          continue;
+        }
+
+        // Create File once and get Shopify-hosted URL
+        const { files: createdFiles, errors: fileCreateErrors } = await createFileInShopify(
+          admin,
+          target.resourceUrl,
+          filename,
+        );
+        const createdVideoId = createdFiles?.[0]?.id;
+        if (fileCreateErrors?.length || !createdVideoId) {
+          results.push({ filename, status: "file_create_failed", errors: fileCreateErrors });
+          continue;
+        }
+
+        // Wait for video to be ready
+        try {
+          await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 2000 });
+        } catch (_) {}
+
+        // Get Shopify-hosted URL
+        const shopifyVideoUrl = await getVideoOriginalSource(admin, createdVideoId);
+        if (!shopifyVideoUrl) {
+          results.push({ filename, status: "file_url_missing" });
+          continue;
+        }
+
+        // Attach to all provided IDs
+        for (const idToken of explicitIds) {
+          try {
+            // Try custom.id first, then SKU
+            let product = await findProductByCustomId(admin, idToken);
+            if (!product?.productId) {
+              const bySku = await findProductAndVariantBySku(admin, idToken);
+              if (bySku?.productId) {
+                product = { productId: bySku.productId, productTitle: bySku.productTitle };
+              }
+            }
+            if (!product?.productId) {
+              results.push({ filename, customId: idToken, status: "no_product_for_id_or_sku" });
+              continue;
+            }
+
+            // Delete existing videos with same alt
+            const altLabel = product.productTitle || idToken;
+            const existingVideos = await listProductVideoMedia(admin, product.productId);
+            const toReplace = existingVideos.filter((video) => 
+              (video.alt || "").trim().toLowerCase() === altLabel.toLowerCase()
+            );
+            if (toReplace.length) {
+              await deleteProductMedia(admin, product.productId, toReplace.map((v) => v.id));
+            }
+
+            // Attach using Shopify-hosted URL
+            const attachRes = await admin.graphql(
+              `#graphql
+                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    media { ... on Media { id alt } }
+                    mediaUserErrors { field message }
+                  }
+                }
+              `,
+              {
+                variables: {
+                  productId: product.productId,
+                  media: [
+                    {
+                      originalSource: shopifyVideoUrl,
+                      mediaContentType: "VIDEO",
+                      alt: altLabel,
+                    },
+                  ],
+                },
+              },
+            );
+            const attachJson = await attachRes.json();
+            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
+            
+            if (attachErrors?.length) {
+              results.push({ filename, customId: idToken, status: "attach_failed", errors: attachErrors });
+            } else {
+              results.push({ filename, customId: idToken, status: "ok", productId: product.productId });
+            }
+          } catch (e) {
+            results.push({ filename, customId: idToken, status: "error", message: e?.message });
+          }
+        }
+        continue;
+      }
+
+      // Original filename-based flow (when no explicit IDs)
       let productId = null;
       let productTitle = null;
       const byCustom = await findProductByCustomId(admin, baseKey);
@@ -331,6 +462,7 @@ export default function VideoUpload() {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
   const [files, setFiles] = useState([]);
+  const [additionalProductIds, setAdditionalProductIds] = useState("");
   const isSubmitting =
     ["loading", "submitting"].includes(fetcher.state) && fetcher.formMethod === "POST";
 
@@ -346,8 +478,11 @@ export default function VideoUpload() {
     if (!files.length || isSubmitting) return;
     const formData = new FormData();
     for (const file of files) formData.append("files", file, file.name);
+    if (additionalProductIds.trim()) {
+      formData.append("additionalProductIds", additionalProductIds);
+    }
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
-  }, [files, fetcher, isSubmitting]);
+  }, [files, fetcher, isSubmitting, additionalProductIds]);
 
   const summary = useMemo(() => {
     const results = fetcher.data?.results || [];
@@ -379,6 +514,15 @@ export default function VideoUpload() {
           <DropZone accept="video/*" allowMultiple onDrop={onDrop}>
             <DropZone.FileUpload actionTitle="Add videos" actionHint="or drop to upload" />
           </DropZone>
+
+          <TextField
+            label="Product IDs (Optional)"
+            value={additionalProductIds}
+            onChange={setAdditionalProductIds}
+            placeholder="1234;2345;456545;"
+            helpText="Enter custom IDs or SKUs separated by semicolons to attach this video to multiple products"
+            multiline={3}
+          />
 
           {files.length ? (
             <Card>
