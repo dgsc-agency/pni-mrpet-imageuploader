@@ -164,6 +164,22 @@ async function waitForVideoReady(admin, videoId, { timeoutMs = 300000, intervalM
   return false;
 }
 
+async function getVideoOriginalSource(admin, videoId) {
+  const res = await admin.graphql(
+    `#graphql
+      query VideoOriginalSource($id: ID!) {
+        node(id: $id) {
+          id
+          ... on Video { originalSource }
+        }
+      }
+    `,
+    { variables: { id: videoId } },
+  );
+  const json = await res.json();
+  return json?.data?.node?.originalSource || null;
+}
+
 async function listProductVideoMedia(admin, productId) {
   const response = await admin.graphql(
     `#graphql
@@ -295,7 +311,14 @@ export const action = async ({ request }) => {
       // Optional: wait for READY (non-blocking if it takes too long)
       try { await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 2000 }); } catch (_) {}
 
-      // Attach using mediaId to the primary product
+      // Fetch the Shopify-hosted originalSource URL for the created video file
+      const shopifyVideoUrl = await getVideoOriginalSource(admin, createdVideoId);
+      if (!shopifyVideoUrl) {
+        results.push({ filename, customId: baseKey, status: "file_url_missing" });
+        continue;
+      }
+
+      // Attach using Shopify-hosted originalSource to the primary product
       const attachPrimaryRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -310,7 +333,8 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                mediaId: createdVideoId,
+                originalSource: shopifyVideoUrl,
+                mediaContentType: "VIDEO",
                 alt: altText || null,
               },
             ],
@@ -356,7 +380,7 @@ export const action = async ({ request }) => {
               await deleteProductMedia(admin, additionalProduct.productId, toReplace.map((v) => v.id));
             }
 
-            // Attach video to additional product using the same mediaId
+            // Attach video to additional product using the Shopify-hosted originalSource
             const attachRes = await admin.graphql(
               `#graphql
                 mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -371,7 +395,8 @@ export const action = async ({ request }) => {
                   productId: additionalProduct.productId,
                   media: [
                     {
-                      mediaId: createdVideoId,
+                      originalSource: shopifyVideoUrl,
+                      mediaContentType: "VIDEO",
                       alt: additionalProduct.productTitle || baseKey,
                     },
                   ],
