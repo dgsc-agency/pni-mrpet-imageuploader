@@ -170,14 +170,14 @@ async function getVideoOriginalSource(admin, videoId) {
       query VideoOriginalSource($id: ID!) {
         node(id: $id) {
           id
-          ... on Video { originalSource }
+          ... on Video { originalSource { url mimeType format } }
         }
       }
     `,
     { variables: { id: videoId } },
   );
   const json = await res.json();
-  return json?.data?.node?.originalSource || null;
+  return json?.data?.node?.originalSource?.url || null;
 }
 
 async function listProductVideoMedia(admin, productId) {
