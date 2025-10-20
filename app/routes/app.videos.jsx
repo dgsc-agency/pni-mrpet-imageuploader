@@ -11,6 +11,7 @@ import {
   List,
   DataTable,
   Banner,
+  TextField,
 } from "@shopify/polaris";
 import { TitleBar, useAppBridge } from "@shopify/app-bridge-react";
 import { json } from "@remix-run/node";
@@ -125,7 +126,7 @@ async function createFileInShopify(admin, resourceUrl, filename) {
     `#graphql
       mutation FileCreate($files: [FileCreateInput!]!) {
         fileCreate(files: $files) {
-          files { __typename ... on Video { id fileStatus url } }
+          files { __typename ... on Video { id fileStatus } }
           userErrors { field message }
         }
       }
@@ -206,6 +207,7 @@ export const action = async ({ request }) => {
   console.log("Video action - shop:", session?.shop);
   const formData = await request.formData();
   const files = formData.getAll("files");
+  const additionalProductIds = formData.get("additionalProductIds") || "";
 
   const results = [];
 
@@ -310,6 +312,96 @@ export const action = async ({ request }) => {
       }
 
       results.push({ filename, customId: baseKey, status: replacedCount ? "replaced" : "ok", replaced: replacedCount, productId, media });
+
+      // Handle additional product IDs if provided
+      if (additionalProductIds.trim()) {
+        const additionalIds = additionalProductIds.split(';').map(id => id.trim()).filter(id => id);
+        const additionalResults = [];
+        
+        for (const additionalId of additionalIds) {
+          try {
+            // Find product by custom ID
+            const additionalProduct = await findProductByCustomId(admin, additionalId);
+            if (!additionalProduct?.productId) {
+              additionalResults.push({ 
+                customId: additionalId, 
+                status: "no_product_for_custom_id",
+                message: `No product found for custom ID: ${additionalId}`
+              });
+              continue;
+            }
+
+            // Delete existing videos with same alt/custom id for this additional product
+            const existingVideos = await listProductVideoMedia(admin, additionalProduct.productId);
+            const toReplace = existingVideos.filter((video) => {
+              const alt = (video.alt || "").trim().toLowerCase();
+              return alt === baseKey.toLowerCase() || alt === uploadedBaseName;
+            });
+            
+            if (toReplace.length) {
+              await deleteProductMedia(admin, additionalProduct.productId, toReplace.map((v) => v.id));
+            }
+
+            // Attach video to additional product using the same resourceUrl
+            const attachRes = await admin.graphql(
+              `#graphql
+                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    media { ... on Media { id alt } }
+                    mediaUserErrors { field message }
+                  }
+                }
+              `,
+              {
+                variables: {
+                  productId: additionalProduct.productId,
+                  media: [
+                    {
+                      originalSource: target.resourceUrl,
+                      mediaContentType: "VIDEO",
+                      alt: additionalProduct.productTitle || baseKey,
+                    },
+                  ],
+                },
+              },
+            );
+            const attachJson = await attachRes.json();
+            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
+            
+            if (attachErrors?.length) {
+              additionalResults.push({ 
+                customId: additionalId, 
+                status: "attach_failed", 
+                errors: attachErrors 
+              });
+            } else {
+              additionalResults.push({ 
+                customId: additionalId, 
+                status: "ok", 
+                productId: additionalProduct.productId,
+                productTitle: additionalProduct.productTitle
+              });
+            }
+          } catch (error) {
+            additionalResults.push({
+              customId: additionalId,
+              status: "error",
+              message: error?.message,
+            });
+          }
+        }
+        
+        // Add additional results to main results
+        results.push(...additionalResults.map(r => ({
+          filename: `${file.name} (additional)`,
+          customId: r.customId,
+          status: r.status,
+          message: r.message,
+          errors: r.errors,
+          productId: r.productId,
+          productTitle: r.productTitle
+        })));
+      }
     } catch (error) {
       const safeName = typeof file === "object" && file?.name ? file.name : String(file);
       const caughtCustomId = typeof safeName === "string" ? extractCustomIdFromFilename(safeName) : undefined;
@@ -331,6 +423,7 @@ export default function VideoUpload() {
   const fetcher = useFetcher();
   const shopify = useAppBridge();
   const [files, setFiles] = useState([]);
+  const [additionalProductIds, setAdditionalProductIds] = useState("");
   const isSubmitting =
     ["loading", "submitting"].includes(fetcher.state) && fetcher.formMethod === "POST";
 
@@ -346,8 +439,11 @@ export default function VideoUpload() {
     if (!files.length || isSubmitting) return;
     const formData = new FormData();
     for (const file of files) formData.append("files", file, file.name);
+    if (additionalProductIds.trim()) {
+      formData.append("additionalProductIds", additionalProductIds);
+    }
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
-  }, [files, fetcher, isSubmitting]);
+  }, [files, fetcher, isSubmitting, additionalProductIds]);
 
   const summary = useMemo(() => {
     const results = fetcher.data?.results || [];
@@ -379,6 +475,15 @@ export default function VideoUpload() {
           <DropZone accept="video/*" allowMultiple onDrop={onDrop}>
             <DropZone.FileUpload actionTitle="Add videos" actionHint="or drop to upload" />
           </DropZone>
+
+          <TextField
+            label="Additional Product IDs (Optional)"
+            value={additionalProductIds}
+            onChange={setAdditionalProductIds}
+            placeholder="1234;1235;1563;1232;"
+            helpText="Enter custom IDs separated by semicolons to attach this video to additional products"
+            multiline={3}
+          />
 
           {files.length ? (
             <Card>
