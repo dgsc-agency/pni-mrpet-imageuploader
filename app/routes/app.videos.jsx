@@ -237,6 +237,102 @@ export const action = async ({ request }) => {
       const filename = file.name;
       const baseKey = extractCustomIdFromFilename(filename);
 
+      // If explicit IDs provided, attach ONLY to those products (ignore filename mapping)
+      const explicitIds = (additionalProductIds || "")
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => !!s);
+      if (explicitIds.length) {
+        // staged upload once
+        const { target, errors: stagedErrors } = await createStagedUpload(admin, {
+          filename,
+          mimeType: file.type,
+          fileSize: file.size,
+        });
+        if (!target) {
+          results.push({ filename, status: "staged_upload_error", errors: stagedErrors });
+          continue;
+        }
+        const uploadedOk = await uploadToS3Target(target, file, filename);
+        if (!uploadedOk) {
+          results.push({ filename, status: "s3_upload_failed" });
+          continue;
+        }
+        const { files: createdFiles, errors: fileCreateErrors } = await createFileInShopify(
+          admin,
+          target.resourceUrl,
+          filename,
+        );
+        const createdVideoId = createdFiles?.[0]?.id;
+        if (fileCreateErrors?.length || !createdVideoId) {
+          results.push({ filename, status: "file_create_failed", errors: fileCreateErrors });
+          continue;
+        }
+        try {
+          await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 1500 });
+        } catch (_) {}
+
+        for (const idToken of explicitIds) {
+          try {
+            // Try custom.id first; if not found, fallback to SKU -> product
+            let product = await findProductByCustomId(admin, idToken);
+            if (!product?.productId) {
+              const bySku = await findProductAndVariantBySku(admin, idToken);
+              if (bySku?.productId) {
+                product = { productId: bySku.productId, productTitle: bySku.productTitle };
+              }
+            }
+            if (!product?.productId) {
+              results.push({ filename, customId: idToken, status: "no_product_for_id_or_sku" });
+              continue;
+            }
+
+            // delete existing with same alt label (prefer product title, fallback to token)
+            const altLabel = product.productTitle || idToken;
+            const existingVideos = await listProductVideoMedia(admin, product.productId);
+            const toReplace = existingVideos.filter((video) => (video.alt || "").trim().toLowerCase() === altLabel.toLowerCase());
+            if (toReplace.length) {
+              await deleteProductMedia(admin, product.productId, toReplace.map((v) => v.id));
+            }
+
+            const attachRes = await admin.graphql(
+              `#graphql
+                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    media { ... on Media { id alt } }
+                    mediaUserErrors { field message }
+                  }
+                }
+              `,
+              {
+                variables: {
+                  productId: product.productId,
+                  media: [
+                    {
+                      id: createdVideoId,
+                      mediaContentType: "VIDEO",
+                      alt: altLabel,
+                    },
+                  ],
+                },
+              },
+            );
+            const attachJson = await attachRes.json();
+            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
+            if (attachErrors?.length) {
+              results.push({ filename, customId: idToken, status: "attach_failed", errors: attachErrors });
+            } else {
+              results.push({ filename, customId: idToken, status: "ok", productId: product.productId });
+            }
+          } catch (e) {
+            results.push({ filename, customId: idToken, status: "error", message: e?.message });
+          }
+        }
+
+        // Done with explicit IDs for this file
+        continue;
+      }
+
       let productId = null;
       let productTitle = null;
       const byCustom = await findProductByCustomId(admin, baseKey);
