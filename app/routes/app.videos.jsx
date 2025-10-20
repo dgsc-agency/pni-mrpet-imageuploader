@@ -326,7 +326,7 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                mediaId: createdVideoId,
+                id: createdVideoId,
                 alt: altText || null,
               },
             ],
@@ -387,7 +387,7 @@ export const action = async ({ request }) => {
                   productId: additionalProduct.productId,
                   media: [
                     {
-                      mediaId: createdVideoId,
+                      id: createdVideoId,
                       alt: additionalProduct.productTitle || baseKey,
                     },
                   ],
