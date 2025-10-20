@@ -311,40 +311,31 @@ export const action = async ({ request }) => {
       // Optional: wait for READY (non-blocking if it takes too long)
       try { await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 2000 }); } catch (_) {}
 
-      // Fetch the Shopify-hosted originalSource URL for the created video file
-      const shopifyVideoUrl = await getVideoOriginalSource(admin, createdVideoId);
-      if (!shopifyVideoUrl) {
-        results.push({ filename, customId: baseKey, status: "file_url_missing" });
-        continue;
-      }
-
-      // Attach using mediaId via productSet (new API)
+      // Attach using mediaId via productCreateMedia (works with created File)
       const attachPrimaryRes = await admin.graphql(
         `#graphql
-          mutation ProductSetMedia($input: ProductSetInput!) {
-            productSet(input: $input) {
-              product { id }
-              userErrors { field message }
+          mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+            productCreateMedia(productId: $productId, media: $media) {
+              media { ... on Media { id alt } }
+              mediaUserErrors { field message }
             }
           }
         `,
         {
           variables: {
-            input: {
-              id: productId,
-              media: [
-                {
-                  mediaId: createdVideoId,
-                  alt: altText || null,
-                },
-              ],
-            },
+            productId,
+            media: [
+              {
+                mediaId: createdVideoId,
+                alt: altText || null,
+              },
+            ],
           },
         },
       );
       const attachPrimaryJson = await attachPrimaryRes.json();
-      const attachPrimaryErrors = attachPrimaryJson?.data?.productSet?.userErrors || [];
-      const media = attachPrimaryErrors?.length ? [] : [{ id: createdVideoId, alt: altText }];
+      const attachPrimaryErrors = attachPrimaryJson?.data?.productCreateMedia?.mediaUserErrors || [];
+      const media = attachPrimaryJson?.data?.productCreateMedia?.media || [];
       if (attachPrimaryErrors?.length) {
         results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachPrimaryErrors });
         continue;
@@ -381,32 +372,30 @@ export const action = async ({ request }) => {
               await deleteProductMedia(admin, additionalProduct.productId, toReplace.map((v) => v.id));
             }
 
-            // Attach video to additional product using mediaId via productSet
+            // Attach video to additional product using mediaId via productCreateMedia
             const attachRes = await admin.graphql(
               `#graphql
-                mutation ProductSetMedia($input: ProductSetInput!) {
-                  productSet(input: $input) {
-                    product { id }
-                    userErrors { field message }
+                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    media { ... on Media { id alt } }
+                    mediaUserErrors { field message }
                   }
                 }
               `,
               {
                 variables: {
-                  input: {
-                    id: additionalProduct.productId,
-                    media: [
-                      {
-                        mediaId: createdVideoId,
-                        alt: additionalProduct.productTitle || baseKey,
-                      },
-                    ],
-                  },
+                  productId: additionalProduct.productId,
+                  media: [
+                    {
+                      mediaId: createdVideoId,
+                      alt: additionalProduct.productTitle || baseKey,
+                    },
+                  ],
                 },
               },
             );
             const attachJson = await attachRes.json();
-            const attachErrors = attachJson?.data?.productSet?.userErrors || [];
+            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
             
             if (attachErrors?.length) {
               additionalResults.push({ 
