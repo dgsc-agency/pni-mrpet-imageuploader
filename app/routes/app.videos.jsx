@@ -327,6 +327,7 @@ export const action = async ({ request }) => {
             media: [
               {
                 id: createdVideoId,
+                mediaContentType: "VIDEO",
                 alt: altText || null,
               },
             ],
@@ -388,6 +389,7 @@ export const action = async ({ request }) => {
                   media: [
                     {
                       id: createdVideoId,
+                      mediaContentType: "VIDEO",
                       alt: additionalProduct.productTitle || baseKey,
                     },
                   ],
