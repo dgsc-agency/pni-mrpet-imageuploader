@@ -98,7 +98,7 @@ This template comes preconfigured with examples of:
 
 Please read the [documentation for @shopify/shopify-app-remix](https://www.npmjs.com/package/@shopify/shopify-app-remix#authenticating-admin-requests) to understand what other API's are available.
 
-## Deployment
+## Deployment 
 
 ### Application Storage
 
