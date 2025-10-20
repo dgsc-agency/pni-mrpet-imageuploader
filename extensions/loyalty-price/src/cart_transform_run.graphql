@@ -1,0 +1,24 @@
+query CartTransformRunInput {
+  cart {
+    lines {
+      id
+      quantity
+      merchandise {
+        ... on ProductVariant {
+          id
+          metafield(namespace: "custom", key: "promotions_data") {
+            value
+          }
+        }
+      }
+    }
+    buyerIdentity {
+      customer {
+        id
+        metafield(namespace: "custom", key: "is_loyalty") {
+          value
+        }
+      }
+    }
+  }
+}

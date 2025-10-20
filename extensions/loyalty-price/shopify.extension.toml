@@ -1,0 +1,21 @@
+api_version = "2025-07"
+
+[[extensions]]
+name = "t:name"
+handle = "loyalty-price"
+type = "function"
+uid = "a6777f07-4105-5033-8973-e95513fa708e39ca7edb"
+description = "t:description"
+
+  [[extensions.targeting]]
+  target = "cart.transform.run"
+  input_query = "src/cart_transform_run.graphql"
+  export = "cart-transform-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"
+
+  [extensions.ui.paths]
+  create = "/"
+  details = "/"

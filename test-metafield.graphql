@@ -1,0 +1,33 @@
+# Test query to check if variant metafield is accessible
+# Replace VARIANT_ID with your actual variant ID
+
+query testVariantMetafield {
+  productVariant(id: "gid://shopify/ProductVariant/YOUR_VARIANT_ID") {
+    id
+    title
+    price
+    metafield(namespace: "custom", key: "promotions-data") {
+      id
+      value
+    }
+  }
+}
+
+# Alternative query to check all metafields on a variant
+query testAllVariantMetafields {
+  productVariant(id: "gid://shopify/ProductVariant/YOUR_VARIANT_ID") {
+    id
+    title
+    metafields(first: 10) {
+      edges {
+        node {
+          id
+          namespace
+          key
+          value
+          type
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+# Test query to check if cart transform is working
+# This will show you the current cart state and pricing
+
+query testCartTransform {
+  cart(id: "YOUR_CART_ID") {
+    id
+    lines {
+      id
+      quantity
+      merchandise {
+        ... on ProductVariant {
+          id
+          title
+          price
+          metafield(namespace: "custom", key: "promotions_data") {
+            value
+          }
+        }
+      }
+      cost {
+        totalAmount {
+          amount
+          currencyCode
+        }
+        subtotalAmount {
+          amount
+          currencyCode
+        }
+      }
+    }
+    cost {
+      totalAmount {
+        amount
+        currencyCode
+      }
+    }
+  }
+}
