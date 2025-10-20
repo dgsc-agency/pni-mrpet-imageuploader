@@ -321,8 +321,8 @@ export const action = async ({ request }) => {
       // Attach using mediaId via productSet (new API)
       const attachPrimaryRes = await admin.graphql(
         `#graphql
-          mutation ProductSetMedia($id: ID!, $media: [CreateMediaInput!]!) {
-            productSet(id: $id, media: $media) {
+          mutation ProductSetMedia($input: ProductSetInput!) {
+            productSet(input: $input) {
               product { id }
               userErrors { field message }
             }
@@ -330,13 +330,15 @@ export const action = async ({ request }) => {
         `,
         {
           variables: {
-            id: productId,
-            media: [
-              {
-                mediaId: createdVideoId,
-                alt: altText || null,
-              },
-            ],
+            input: {
+              id: productId,
+              media: [
+                {
+                  mediaId: createdVideoId,
+                  alt: altText || null,
+                },
+              ],
+            },
           },
         },
       );
@@ -382,8 +384,8 @@ export const action = async ({ request }) => {
             // Attach video to additional product using mediaId via productSet
             const attachRes = await admin.graphql(
               `#graphql
-                mutation ProductSetMedia($id: ID!, $media: [CreateMediaInput!]!) {
-                  productSet(id: $id, media: $media) {
+                mutation ProductSetMedia($input: ProductSetInput!) {
+                  productSet(input: $input) {
                     product { id }
                     userErrors { field message }
                   }
@@ -391,13 +393,15 @@ export const action = async ({ request }) => {
               `,
               {
                 variables: {
-                  id: additionalProduct.productId,
-                  media: [
-                    {
-                      mediaId: createdVideoId,
-                      alt: additionalProduct.productTitle || baseKey,
-                    },
-                  ],
+                  input: {
+                    id: additionalProduct.productId,
+                    media: [
+                      {
+                        mediaId: createdVideoId,
+                        alt: additionalProduct.productTitle || baseKey,
+                      },
+                    ],
+                  },
                 },
               },
             );
