@@ -280,8 +280,23 @@ export const action = async ({ request }) => {
       // Alt text: Use product title if available, otherwise use filename key
       const altText = productTitle || baseKey;
 
-      // Attach directly using originalSource from staged VIDEO (no FileCreate, no mediaId)
-      const attachRes = await admin.graphql(
+      // Create a single Shopify File (VIDEO) from staged target, then attach by mediaId
+      const { files: createdFiles, errors: fileCreateErrors } = await createFileInShopify(
+        admin,
+        target.resourceUrl,
+        altText,
+      );
+      const createdVideoId = createdFiles?.[0]?.id;
+      if (fileCreateErrors?.length || !createdVideoId) {
+        results.push({ filename, customId: baseKey, status: "file_create_failed", errors: fileCreateErrors });
+        continue;
+      }
+
+      // Optional: wait for READY (non-blocking if it takes too long)
+      try { await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 2000 }); } catch (_) {}
+
+      // Attach using mediaId to the primary product
+      const attachPrimaryRes = await admin.graphql(
         `#graphql
           mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
             productCreateMedia(productId: $productId, media: $media) {
@@ -295,19 +310,18 @@ export const action = async ({ request }) => {
             productId,
             media: [
               {
-                originalSource: target.resourceUrl,
-                mediaContentType: "VIDEO",
+                mediaId: createdVideoId,
                 alt: altText || null,
               },
             ],
           },
         },
       );
-      const attachJson = await attachRes.json();
-      const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
-      const media = attachJson?.data?.productCreateMedia?.media || [];
-      if (attachErrors?.length) {
-        results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachErrors });
+      const attachPrimaryJson = await attachPrimaryRes.json();
+      const attachPrimaryErrors = attachPrimaryJson?.data?.productCreateMedia?.mediaUserErrors || [];
+      const media = attachPrimaryJson?.data?.productCreateMedia?.media || [];
+      if (attachPrimaryErrors?.length) {
+        results.push({ filename, customId: baseKey, status: "attach_failed", errors: attachPrimaryErrors });
         continue;
       }
 
@@ -342,7 +356,7 @@ export const action = async ({ request }) => {
               await deleteProductMedia(admin, additionalProduct.productId, toReplace.map((v) => v.id));
             }
 
-            // Attach video to additional product using the same resourceUrl
+            // Attach video to additional product using the same mediaId
             const attachRes = await admin.graphql(
               `#graphql
                 mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
@@ -357,8 +371,7 @@ export const action = async ({ request }) => {
                   productId: additionalProduct.productId,
                   media: [
                     {
-                      originalSource: target.resourceUrl,
-                      mediaContentType: "VIDEO",
+                      mediaId: createdVideoId,
                       alt: additionalProduct.productTitle || baseKey,
                     },
                   ],
