@@ -244,88 +244,105 @@ export const action = async ({ request }) => {
         .filter((s) => !!s);
 
       if (explicitIds.length) {
-        // Upload video once and attach to all provided IDs
-        const { target, errors: stagedErrors } = await createStagedUpload(admin, {
-          filename,
-          mimeType: file.type,
-          fileSize: file.size,
-        });
-        if (!target) {
-          results.push({ filename, status: "staged_upload_error", errors: stagedErrors });
-          continue;
-        }
-
-        const uploaded = await uploadToS3Target(target, file, filename);
-        if (!uploaded) {
-          results.push({ filename, status: "s3_upload_failed" });
-          continue;
-        }
-
-        // Create File once and get Shopify-hosted URL
-        const { files: createdFiles, errors: fileCreateErrors } = await createFileInShopify(
-          admin,
-          target.resourceUrl,
-          filename,
-        );
-        const createdVideoId = createdFiles?.[0]?.id;
-        if (fileCreateErrors?.length || !createdVideoId) {
-          results.push({ filename, status: "file_create_failed", errors: fileCreateErrors });
-          continue;
-        }
-
-        // Wait for video to be ready
-        try {
-          await waitForVideoReady(admin, createdVideoId, { timeoutMs: 120000, intervalMs: 2000 });
-        } catch (_) {}
-
-        // Get Shopify-hosted URL
-        const shopifyVideoUrl = await getVideoOriginalSource(admin, createdVideoId);
-        if (!shopifyVideoUrl) {
-          results.push({ filename, status: "file_url_missing" });
-          continue;
-        }
-
-        // Attach to all provided IDs using the same file
-        for (const idToken of explicitIds) {
+        // For bulk operations, repeat the entire upload process for each custom ID
+        for (const customId of explicitIds) {
           try {
-            // Try custom.id first, then SKU
-            let product = await findProductByCustomId(admin, idToken);
-            if (!product?.productId) {
-              const bySku = await findProductAndVariantBySku(admin, idToken);
-              if (bySku?.productId) {
-                product = { productId: bySku.productId, productTitle: bySku.productTitle };
-              }
-            }
-            if (!product?.productId) {
-              results.push({ filename, customId: idToken, status: "no_product_for_id_or_sku" });
+            // Find product by custom ID
+            const productMatch = await findProductByCustomId(admin, customId);
+            if (!productMatch?.productId) {
+              results.push({ filename, customId, status: "no_product_for_custom_id" });
               continue;
             }
 
-            // Delete existing videos with same alt
-            const altLabel = product.productTitle || idToken;
-            const existingVideos = await listProductVideoMedia(admin, product.productId);
-            const toReplace = existingVideos.filter((video) => 
-              (video.alt || "").trim().toLowerCase() === altLabel.toLowerCase()
-            );
+            const { productId, productTitle } = productMatch;
+
+            // Check existing videos on product; match by exact alt text OR filename equality
+            const existingVideos = await listProductVideoMedia(admin, productId);
+            const uploadedBaseName = (filename.split("/").pop() || filename).split("?")[0].toLowerCase();
+            const toReplace = existingVideos.filter((video) => {
+              const alt = (video.alt || "").trim().toLowerCase();
+              const src = video?.image?.url || video?.image?.originalSrc || "";
+              const existingBaseName = (src.split("/").pop() || "").split("?")[0].toLowerCase();
+              const isVideoFile = /\.(mp4|mov|webm|avi|mkv)$/i.test(existingBaseName);
+              return (alt === customId.toLowerCase() || (!!existingBaseName && existingBaseName === uploadedBaseName)) && isVideoFile;
+            });
+
+            let replacedCount = 0;
             if (toReplace.length) {
-              await deleteProductMedia(admin, product.productId, toReplace.map((v) => v.id));
+              const { deleted, errors: delErrors } = await deleteProductMedia(
+                admin,
+                productId,
+                toReplace.map((v) => v.id),
+              );
+              replacedCount = deleted;
+              if (delErrors?.length) {
+                results.push({ filename, customId, status: "delete_existing_failed", errors: delErrors });
+                continue;
+              }
             }
 
-            // Attach using the file ID (not creating new file)
-            const { media, errors: attachErrors } = await attachVideoToProduct(
-              admin,
-              product.productId,
-              createdVideoId,
-              altLabel,
+            // Upload file for this specific product (repeat the entire process)
+            const { target, errors: stagedErrors } = await createStagedUpload(admin, {
+              filename,
+              mimeType: file.type,
+              fileSize: file.size,
+            });
+            if (!target) {
+              results.push({ filename, customId, status: "staged_upload_error", errors: stagedErrors });
+              continue;
+            }
+
+            const uploaded = await uploadToS3Target(target, file, filename);
+            if (!uploaded) {
+              results.push({ filename, customId, status: "s3_upload_failed" });
+              continue;
+            }
+
+            // Alt text: Use product title if available, otherwise use custom ID
+            const altText = productTitle || customId;
+
+            // Attach directly using originalSource from staged VIDEO (same as single file logic)
+            const attachRes = await admin.graphql(
+              `#graphql
+                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+                  productCreateMedia(productId: $productId, media: $media) {
+                    media { ... on Media { id alt } }
+                    mediaUserErrors { field message }
+                  }
+                }
+              `,
+              {
+                variables: {
+                  productId,
+                  media: [
+                    {
+                      originalSource: target.resourceUrl,
+                      mediaContentType: "VIDEO",
+                      alt: altText || null,
+                    },
+                  ],
+                },
+              },
             );
+            const attachJson = await attachRes.json();
+            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
+            const media = attachJson?.data?.productCreateMedia?.media || [];
             
             if (attachErrors?.length) {
-              results.push({ filename, customId: idToken, status: "attach_failed", errors: attachErrors });
-            } else {
-              results.push({ filename, customId: idToken, status: "ok", productId: product.productId, media });
+              results.push({ filename, customId, status: "attach_failed", errors: attachErrors });
+              continue;
             }
-          } catch (e) {
-            results.push({ filename, customId: idToken, status: "error", message: e?.message });
+
+            results.push({ 
+              filename, 
+              customId, 
+              status: replacedCount ? "replaced" : "ok", 
+              replaced: replacedCount, 
+              productId, 
+              media 
+            });
+          } catch (error) {
+            results.push({ filename, customId, status: "error", message: error?.message });
           }
         }
         continue;
