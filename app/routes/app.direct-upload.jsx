@@ -159,80 +159,43 @@ async function attachVideoToProduct(admin, productId, fileId, altText) {
   return { media, errors };
 }
 
+// Get staged upload URL without processing the file
 export const action = async ({ request }) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
-  const file = formData.get("file");
+  const filename = formData.get("filename");
+  const mimeType = formData.get("mimeType");
+  const fileSize = formData.get("fileSize");
   const customIds = formData.get("customIds") || "";
 
-  if (!file || typeof file === "string") {
-    return json({ success: false, error: "No file provided" });
+  if (!filename || !mimeType || !fileSize) {
+    return json({ success: false, error: "Missing file information" });
   }
 
-  const filename = file.name;
   const idList = customIds.split(";").map(s => s.trim()).filter(s => !!s);
-
   if (idList.length === 0) {
     return json({ success: false, error: "No custom IDs provided" });
   }
 
   try {
-    // Step 1: Create staged upload
+    // Only create staged upload URL - don't process the file
     const { target, errors: stagedErrors } = await createStagedUpload(admin, {
       filename,
-      mimeType: file.type,
-      fileSize: file.size,
+      mimeType,
+      fileSize: parseInt(fileSize),
     });
 
     if (!target) {
       return json({ success: false, error: "Staged upload failed", errors: stagedErrors });
     }
 
-    // Step 2: Upload to S3
-    const uploaded = await uploadToS3Target(target, file, filename);
-    if (!uploaded) {
-      return json({ success: false, error: "S3 upload failed" });
-    }
-
-    // Step 3: Create file in Shopify
-    const { files, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
-    if (fileErrors?.length) {
-      return json({ success: false, error: "File creation failed", errors: fileErrors });
-    }
-
-    const fileId = files?.[0]?.id;
-    if (!fileId) {
-      return json({ success: false, error: "No file ID returned" });
-    }
-
-    // Step 4: Attach to all products
-    const results = [];
-    for (const customId of idList) {
-      try {
-        const productMatch = await findProductByCustomId(admin, customId);
-        if (!productMatch?.productId) {
-          results.push({ customId, status: "no_product_found" });
-          continue;
-        }
-
-        const { media, errors: attachErrors } = await attachVideoToProduct(
-          admin,
-          productMatch.productId,
-          fileId,
-          productMatch.productTitle || customId,
-        );
-
-        if (attachErrors?.length) {
-          results.push({ customId, status: "attach_failed", errors: attachErrors });
-        } else {
-          results.push({ customId, status: "success", productId: productMatch.productId });
-        }
-      } catch (error) {
-        results.push({ customId, status: "error", message: error.message });
-      }
-    }
-
-    return json({ success: true, results, fileId });
+    return json({ 
+      success: true, 
+      uploadUrl: target.url,
+      resourceUrl: target.resourceUrl,
+      parameters: target.parameters,
+      customIds: idList
+    });
   } catch (error) {
     return json({ success: false, error: error.message });
   }
@@ -251,15 +214,70 @@ export default function DirectUpload() {
     }
   }, []);
 
-  const handleSubmit = useCallback(() => {
+  const handleSubmit = useCallback(async () => {
     if (!file || !customIds.trim() || isSubmitting) return;
     
-    const formData = new FormData();
-    formData.append("file", file, file.name);
-    formData.append("customIds", customIds);
-    
-    fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
-  }, [file, customIds, fetcher, isSubmitting]);
+    try {
+      // Step 1: Get staged upload URL (no file data sent)
+      const formData = new FormData();
+      formData.append("filename", file.name);
+      formData.append("mimeType", file.type);
+      formData.append("fileSize", file.size.toString());
+      formData.append("customIds", customIds);
+      
+      const response = await fetch("/app/direct-upload", {
+        method: "POST",
+        body: formData,
+      });
+      
+      const uploadData = await response.json();
+      
+      if (!uploadData.success) {
+        shopify.toast.show(`Upload failed: ${uploadData.error}`, { isError: true });
+        return;
+      }
+
+      // Step 2: Upload file directly to S3 (bypasses serverless function)
+      const s3FormData = new FormData();
+      for (const param of uploadData.parameters) {
+        s3FormData.append(param.name, param.value);
+      }
+      s3FormData.append("file", file, file.name);
+      
+      const s3Response = await fetch(uploadData.uploadUrl, {
+        method: "POST",
+        body: s3FormData,
+      });
+      
+      if (!s3Response.ok) {
+        shopify.toast.show("S3 upload failed", { isError: true });
+        return;
+      }
+
+      // Step 3: Create file in Shopify and attach to products
+      const createResponse = await fetch("/app/direct-upload/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          resourceUrl: uploadData.resourceUrl,
+          filename: file.name,
+          customIds: uploadData.customIds,
+        }),
+      });
+      
+      const result = await createResponse.json();
+      
+      if (result.success) {
+        shopify.toast.show("Video uploaded successfully!");
+        setFile(null);
+        setCustomIds("");
+      } else {
+        shopify.toast.show(`Upload failed: ${result.error}`, { isError: true });
+      }
+    } catch (error) {
+      shopify.toast.show(`Upload failed: ${error.message}`, { isError: true });
+    }
+  }, [file, customIds, isSubmitting, shopify]);
 
   const clearAll = useCallback(() => {
     setFile(null);
