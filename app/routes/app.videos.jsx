@@ -121,6 +121,43 @@ async function uploadToS3Target(target, file, filename) {
   return res.ok;
 }
 
+// Direct upload function for large files
+async function directUploadLargeFile(admin, file, filename) {
+  try {
+    // Create staged upload for large file
+    const { target, errors: stagedErrors } = await createStagedUpload(admin, {
+      filename,
+      mimeType: file.type,
+      fileSize: file.size,
+    });
+    
+    if (!target) {
+      return { success: false, errors: stagedErrors };
+    }
+
+    // Upload directly to S3
+    const uploaded = await uploadToS3Target(target, file, filename);
+    if (!uploaded) {
+      return { success: false, errors: ["S3 upload failed"] };
+    }
+
+    // Create file in Shopify using the resource URL
+    const { files, errors: fileErrors } = await createFileInShopify(admin, target.resourceUrl, filename);
+    if (fileErrors?.length) {
+      return { success: false, errors: fileErrors };
+    }
+
+    const fileId = files?.[0]?.id;
+    if (!fileId) {
+      return { success: false, errors: ["No file ID returned"] };
+    }
+
+    return { success: true, fileId, resourceUrl: target.resourceUrl };
+  } catch (error) {
+    return { success: false, errors: [error.message] };
+  }
+}
+
 async function createFileInShopify(admin, resourceUrl, filename) {
   const response = await admin.graphql(
     `#graphql
@@ -221,6 +258,19 @@ async function deleteProductMedia(admin, productId, mediaIds) {
 export const action = async ({ request }) => {
   const { admin, session } = await authenticate.admin(request);
   console.log("Video action - shop:", session?.shop);
+  
+  // Check content length for large files
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && parseInt(contentLength) > 5 * 1024 * 1024) { // 5MB limit
+    return json({ 
+      results: [{ 
+        filename: "Large file detected", 
+        status: "file_too_large", 
+        message: "File is too large for direct upload. Please use a file smaller than 5MB or contact support for large file uploads." 
+      }] 
+    });
+  }
+  
   const formData = await request.formData();
   const files = formData.getAll("files");
   const additionalProductIds = formData.get("additionalProductIds") || "";
@@ -466,6 +516,7 @@ export default function VideoUpload() {
     ["loading", "submitting"].includes(fetcher.state) && fetcher.formMethod === "POST";
 
   const onDrop = useCallback((_dropFiles, acceptedFiles) => {
+    // Remove file size limit for direct uploads
     setFiles((prev) => [...prev, ...acceptedFiles]);
   }, []);
 
@@ -531,7 +582,12 @@ export default function VideoUpload() {
                   {files.map((f, i) => (
                     <List.Item key={`${f.name}-${i}`}>
                       <InlineStack align="space-between">
-                        <span><code>{f.name}</code></span>
+                        <span>
+                          <code>{f.name}</code>
+                          <Text as="span" variant="bodySm" tone="subdued">
+                            ({(f.size / 1024 / 1024).toFixed(1)}MB)
+                          </Text>
+                        </span>
                         <Button onClick={() => removeFile(i)} variant="tertiary">Remove</Button>
                       </InlineStack>
                     </List.Item>
