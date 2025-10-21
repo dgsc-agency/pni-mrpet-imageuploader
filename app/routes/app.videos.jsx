@@ -285,7 +285,7 @@ export const action = async ({ request }) => {
           continue;
         }
 
-        // Attach to all provided IDs
+        // Attach to all provided IDs using the same file
         for (const idToken of explicitIds) {
           try {
             // Try custom.id first, then SKU
@@ -311,36 +311,18 @@ export const action = async ({ request }) => {
               await deleteProductMedia(admin, product.productId, toReplace.map((v) => v.id));
             }
 
-            // Attach using Shopify-hosted URL
-            const attachRes = await admin.graphql(
-              `#graphql
-                mutation ProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
-                  productCreateMedia(productId: $productId, media: $media) {
-                    media { ... on Media { id alt } }
-                    mediaUserErrors { field message }
-                  }
-                }
-              `,
-              {
-                variables: {
-                  productId: product.productId,
-                  media: [
-                    {
-                      originalSource: shopifyVideoUrl,
-                      mediaContentType: "VIDEO",
-                      alt: altLabel,
-                    },
-                  ],
-                },
-              },
+            // Attach using the file ID (not creating new file)
+            const { media, errors: attachErrors } = await attachVideoToProduct(
+              admin,
+              product.productId,
+              createdVideoId,
+              altLabel,
             );
-            const attachJson = await attachRes.json();
-            const attachErrors = attachJson?.data?.productCreateMedia?.mediaUserErrors || [];
             
             if (attachErrors?.length) {
               results.push({ filename, customId: idToken, status: "attach_failed", errors: attachErrors });
             } else {
-              results.push({ filename, customId: idToken, status: "ok", productId: product.productId });
+              results.push({ filename, customId: idToken, status: "ok", productId: product.productId, media });
             }
           } catch (e) {
             results.push({ filename, customId: idToken, status: "error", message: e?.message });
