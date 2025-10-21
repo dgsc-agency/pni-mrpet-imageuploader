@@ -25,6 +25,9 @@ export default function App() {
         <Link to="/app/videos">
           Video Uploader
         </Link>
+        <Link to="/app/direct-upload">
+          Direct Upload (Large Files)
+        </Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
