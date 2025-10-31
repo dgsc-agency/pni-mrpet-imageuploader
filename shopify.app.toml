@@ -22,7 +22,7 @@ api_version = "2025-07"
 scopes = "read_products,write_products,write_files"
 
 [app_proxy]
-url = "https://pni-mrpet-imageuploader.vercel.app/api"
+url = "https://mrpet-backend-service.vercel.app/api"
 prefix = "apps"
 subpath = "service-bridge"
 
