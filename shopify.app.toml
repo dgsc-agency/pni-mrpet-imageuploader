@@ -19,8 +19,11 @@ api_version = "2025-07"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_products,write_files"
-
+scopes = "read_products,write_products,write_files,read_metaobjects,write_metaobjects,read_content,write_content"
+[app_proxy]
+url = "https://mrpet-backend-service.vercel.app/api"
+prefix = "apps"
+subpath = "service-bridge"
 [auth]
 redirect_urls = [
   "https://pni-mrpet-imageuploader.vercel.app/auth/callback",

@@ -28,6 +28,9 @@ export default function App() {
         <Link to="/app/direct-upload">
           Direct Upload (Large Files)
         </Link>
+        <Link to="/app/vasi-ljubimci">
+          Vasi ljubimci
+        </Link>
       </NavMenu>
       <Outlet />
     </AppProvider>
