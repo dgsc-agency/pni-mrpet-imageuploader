@@ -1,5 +1,5 @@
 import { json } from "@remix-run/node";
-import { useLoaderData, useSearchParams, useFetcher } from "@remix-run/react";
+import { useLoaderData, useSearchParams, useFetcher, useRevalidator } from "@remix-run/react";
 import { useCallback, useMemo, useEffect } from "react";
 import {
   Page,
@@ -258,6 +258,7 @@ export default function VasiLjubimci() {
   const { metaobjects, pageInfo, error } = useLoaderData();
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher();
+  const revalidator = useRevalidator();
   const shopify = useAppBridge();
 
   const currentCursor = searchParams.get("cursor") || null;
@@ -265,14 +266,14 @@ export default function VasiLjubimci() {
   useEffect(() => {
     if (fetcher.data?.success) {
       shopify.toast.show("Status updated successfully");
-      // Reload to refresh the data
-      window.location.reload();
+      // Revalidate the loader data instead of full page reload
+      revalidator.revalidate();
     } else if (fetcher.data?.error) {
       shopify.toast.show(`Failed to update status: ${fetcher.data.error}`, {
         isError: true,
       });
     }
-  }, [fetcher.data, shopify]);
+  }, [fetcher.data, shopify, revalidator]);
 
   const handleStatusChange = useCallback(
     (id, newStatus) => {
